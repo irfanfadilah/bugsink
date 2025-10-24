@@ -15,6 +15,7 @@ from teams.models import Team, TeamMembership
 
 from .models import MessagingServiceConfig
 from .service_backends.slack import slack_backend_send_test_message, slack_backend_send_alert
+from .service_backends.discord import discord_backend_send_test_message, discord_backend_send_alert
 from .tasks import send_new_issue_alert, send_regression_alert, send_unmute_alert, _get_users_for_email_alert
 from .views import DEBUG_CONTEXTS
 
@@ -302,3 +303,132 @@ class TestSlackBackendErrorHandling(DjangoTestCase):
         self.config.clear_failure_status()
         self.config.save()
         self.assertFalse(self.config.has_recent_failure())
+
+
+class TestDiscordBackendErrorHandling(DjangoTestCase):
+    def setUp(self):
+        self.project = Project.objects.create(name="Test project")
+        self.config = MessagingServiceConfig.objects.create(
+            project=self.project,
+            display_name="Test Discord",
+            kind="discord",
+            config=json.dumps({"webhook_url": "https://discord.com/api/webhooks/test"}),
+        )
+
+    @patch('alerts.service_backends.discord.requests.post')
+    def test_discord_test_message_success_clears_failure_status(self, mock_post):
+        # Set up existing failure status
+        self.config.last_failure_timestamp = timezone.now()
+        self.config.last_failure_status_code = 500
+        self.config.last_failure_response_text = "Server Error"
+        self.config.save()
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        # Send test message
+        discord_backend_send_test_message(
+            "https://discord.com/api/webhooks/test",
+            "Test project",
+            "Test Discord",
+            self.config.id
+        )
+
+        # Verify failure status was cleared
+        self.config.refresh_from_db()
+        self.assertIsNone(self.config.last_failure_timestamp)
+        self.assertIsNone(self.config.last_failure_status_code)
+        self.assertIsNone(self.config.last_failure_response_text)
+
+    @patch('alerts.service_backends.discord.requests.post')
+    def test_discord_test_message_http_error_stores_failure(self, mock_post):
+        # Mock HTTP error response
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.text = '{"message": "Unknown Webhook"}'
+
+        # Create the HTTPError with response attached
+        http_error = requests.HTTPError()
+        http_error.response = mock_response
+        mock_response.raise_for_status.side_effect = http_error
+
+        mock_post.return_value = mock_response
+
+        # Send test message
+        discord_backend_send_test_message(
+            "https://discord.com/api/webhooks/test",
+            "Test project",
+            "Test Discord",
+            self.config.id
+        )
+
+        # Verify failure status was stored
+        self.config.refresh_from_db()
+        self.assertIsNotNone(self.config.last_failure_timestamp)
+        self.assertEqual(self.config.last_failure_status_code, 404)
+        self.assertEqual(self.config.last_failure_response_text, '{"message": "Unknown Webhook"}')
+        self.assertTrue(self.config.last_failure_is_json)
+        self.assertEqual(self.config.last_failure_error_type, "HTTPError")
+
+    @patch('alerts.service_backends.discord.requests.post')
+    def test_discord_alert_message_success_clears_failure_status(self, mock_post):
+        # Set up existing failure status
+        self.config.last_failure_timestamp = timezone.now()
+        self.config.last_failure_status_code = 500
+        self.config.save()
+
+        # Create issue
+        issue, _ = get_or_create_issue(project=self.project)
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        # Send alert message
+        discord_backend_send_alert(
+            "https://discord.com/api/webhooks/test",
+            issue.id,
+            "New issue",
+            "a",
+            "NEW",
+            self.config.id
+        )
+
+        # Verify failure status was cleared
+        self.config.refresh_from_db()
+        self.assertIsNone(self.config.last_failure_timestamp)
+
+    @patch('alerts.service_backends.discord.requests.post')
+    def test_discord_alert_with_unmute_reason(self, mock_post):
+        # Create issue
+        issue, _ = get_or_create_issue(project=self.project)
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        # Send alert message with unmute reason
+        discord_backend_send_alert(
+            "https://discord.com/api/webhooks/test",
+            issue.id,
+            "Unmuted issue",
+            "an",
+            "UNMUTED",
+            self.config.id,
+            unmute_reason="Issue was unmuted because it happened again"
+        )
+
+        # Verify the request was made
+        self.assertTrue(mock_post.called)
+        call_args = mock_post.call_args
+        data = json.loads(call_args[1]['data'])
+        self.assertIn('embeds', data)
+        self.assertIn('description', data['embeds'][0])
+        self.assertIn('unmuted', data['embeds'][0]['description'].lower())
