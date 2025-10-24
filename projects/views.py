@@ -23,6 +23,7 @@ from bugsink.utils import assert_
 from alerts.models import MessagingServiceConfig
 from alerts.forms import MessagingServiceConfigForm
 from alerts.service_backends.slack import SlackConfigForm
+from alerts.service_backends.discord import DiscordConfigForm
 
 from .models import Project, ProjectMembership, ProjectRole, ProjectVisibility
 from .forms import ProjectMembershipForm, MyProjectMembershipForm, ProjectMemberInviteForm, ProjectForm
@@ -457,7 +458,12 @@ def project_messaging_service_add(request, project_pk):
 
     if request.method == 'POST':
         form = MessagingServiceConfigForm(project, request.POST)
-        config_form = SlackConfigForm(data=request.POST)
+
+        kind = request.POST.get('kind', 'slack')
+        if kind == 'discord':
+            config_form = DiscordConfigForm(data=request.POST)
+        else:
+            config_form = SlackConfigForm(data=request.POST)
 
         if form.is_valid() and config_form.is_valid():
             service = form.save(commit=False)
@@ -487,7 +493,12 @@ def project_messaging_service_edit(request, project_pk, service_pk):
 
     if request.method == 'POST':
         form = MessagingServiceConfigForm(project, request.POST, instance=instance)
-        config_form = SlackConfigForm(data=request.POST)
+
+        kind = request.POST.get('kind', instance.kind)
+        if kind == 'discord':
+            config_form = DiscordConfigForm(data=request.POST)
+        else:
+            config_form = SlackConfigForm(data=request.POST)
 
         if form.is_valid() and config_form.is_valid():
             service = form.save(commit=False)
@@ -499,7 +510,10 @@ def project_messaging_service_edit(request, project_pk, service_pk):
 
     else:
         form = MessagingServiceConfigForm(project, instance=instance)
-        config_form = SlackConfigForm(config=json.loads(instance.config))
+        if instance.kind == 'discord':
+            config_form = DiscordConfigForm(config=json.loads(instance.config))
+        else:
+            config_form = SlackConfigForm(config=json.loads(instance.config))
 
     return render(request, 'projects/project_messaging_service_edit.html', {
         'project': project,
